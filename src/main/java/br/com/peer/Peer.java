@@ -12,6 +12,9 @@ public class Peer {
     private List<Socket> connections = new ArrayList<>();
     public static boolean is_chatting = false;
     public static Peer hostPeer;
+    public static Map<String, List<String>> history = new HashMap<>();
+    public static String hostAtual;
+    public static boolean is_connecting = false;
 
     public Peer(String username, int port) {
         this.username = username;
@@ -49,6 +52,9 @@ public class Peer {
                 String message;
                 while ((message = in.readLine()) != null) {
                     System.out.println(message);
+                    if (history.containsKey(hostAtual) && is_chatting) {
+                        history.get(hostAtual).add(message);
+                    }
                 }
             } catch (IOException e) {
                 //Thread.currentThread().interrupt();
@@ -61,12 +67,15 @@ public class Peer {
     private void listenForUserInput() {
         try (BufferedReader userInput = new BufferedReader(new InputStreamReader(System.in))) {
             while (true) {
-                if (!is_chatting) {
+                if (!is_connecting) {
                     System.out.println("Nenhuma conexão estabelecida");
                     NewConnection();
                 } else {
                     String message = userInput.readLine();
                     broadcastMessage(message);
+                    if (history.containsKey(hostAtual) && is_chatting) {
+                        history.get(hostAtual).add(message);
+                    }
                 }
             }
         } catch (IOException e) {
@@ -85,6 +94,7 @@ public class Peer {
                         System.out.println("Você encerrou a conexão.");
                         socket.close();
                         is_chatting = false;
+                        is_connecting = false;
                     } else {
                         out.println(username + ": " + message);
                     }
@@ -98,10 +108,20 @@ public class Peer {
 
     public void connectToPeer(String host, int port) {
         try {
+            hostAtual = host;
             Socket socket = new Socket(host, port);
             connections.add(socket);
             new Thread(() -> handleConnection(socket)).start();
             System.out.println("Conectado ao peer em " + host + ":" + port);
+            if (!history.containsKey(host)) {
+                history.put(host, new ArrayList<>());
+                System.out.println("Nova entrada criada para: " + host);
+            } else {
+                List<String> historico = history.get(host);
+                for( int i = 0; i < historico.size(); i++ ) {
+                    System.out.println(historico.get(i));
+                }
+            }
         } catch (IOException e) {
             System.out.println("Erro ao conectar ao peer em " + host + ":" + port);
             e.printStackTrace();
@@ -110,6 +130,7 @@ public class Peer {
     }
 
     public static void main(String[] args) {
+        System.out.println(history);
         Scanner scanner = new Scanner(System.in);
 
         // Solicita o nome do usuário
@@ -128,9 +149,8 @@ public class Peer {
     }
 
     public static void NewConnection() {
-        //hostPeer.is_chatting = true;
         Scanner scanner = new Scanner(System.in);
-        is_chatting = true;
+        is_connecting = true;
         hostPeer.start();
 
         // Pergunta se deseja conectar a outro peer
@@ -145,6 +165,7 @@ public class Peer {
             int peerPort = scanner.nextInt();
             scanner.nextLine(); // Consumir a nova linha pendente
 
+            is_chatting = true;
             // Conecta ao peer
             hostPeer.connectToPeer(peerHost, peerPort);
         }
