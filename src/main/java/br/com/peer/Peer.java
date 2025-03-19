@@ -2,7 +2,6 @@ package br.com.peer;
 
 import java.io.*;
 import java.net.*;
-import java.nio.Buffer;
 import java.util.*;
 
 public class Peer {
@@ -16,21 +15,146 @@ public class Peer {
     public static String hostAtual;
     public static boolean is_connecting = false;
 
+    // Constantes para descoberta
+    private static final int DISCOVERY_PORT = 8888;
+    private static final String DISCOVERY_REQUEST = "PEER_DISCOVERY_REQUEST";
+    private static final String DISCOVERY_RESPONSE = "PEER_DISCOVERY_RESPONSE";
+
+    // Classe auxiliar para armazenar informações de peers
+    public static class PeerInfo {
+        public String username;
+        public String ip;
+        public int port;
+
+        public PeerInfo(String username, String ip, int port) {
+            this.username = username;
+            this.ip = ip;
+            this.port = port;
+        }
+
+        @Override
+        public String toString() {
+            return username + " - " + ip + ":" + port;
+        }
+    }
+
     public Peer(String username, int port) {
         this.username = username;
-        this.port = port;
         try {
+            // Se a porta for 0, o ServerSocket aloca automaticamente uma porta livre.
             serverSocket = new ServerSocket(port);
-            System.out.println("Peer " + username + " está ouvindo na porta " + port);
+            // Atualiza o valor da porta para o que foi realmente alocado.
+            this.port = serverSocket.getLocalPort();
+            System.out.println("Peer " + username + " está ouvindo na porta " + this.port);
+            System.out.println("Endereço IP: " + getLocalIPAddress());
         } catch (IOException e) {
             e.printStackTrace();
-            System.out.println("7");
+            System.out.println("Erro ao iniciar o servidor.");
         }
     }
 
     public void start() {
         new Thread(this::listenForConnections).start();
         new Thread(this::listenForUserInput).start();
+    }
+
+    // Inicia o serviço que responde às requisições de descoberta de peers
+    public void startDiscoveryResponder() {
+        new Thread(() -> {
+            try (DatagramSocket socket = new DatagramSocket(DISCOVERY_PORT, InetAddress.getByName("0.0.0.0"))) {
+                socket.setBroadcast(true);
+                while (true) {
+                    byte[] buf = new byte[256];
+                    DatagramPacket packet = new DatagramPacket(buf, buf.length);
+                    socket.receive(packet);
+                    String message = new String(packet.getData(), 0, packet.getLength());
+                    if (message.equals(DISCOVERY_REQUEST)) {
+                        // Monta a resposta com informações: username, IP e porta do peer
+                        String response = DISCOVERY_RESPONSE + ":" + username + ":" + getLocalIPAddress() + ":" + port;
+                        byte[] responseData = response.getBytes();
+                        DatagramPacket responsePacket = new DatagramPacket(
+                                responseData, responseData.length, packet.getAddress(), packet.getPort());
+                        socket.send(responsePacket);
+                    }
+                }
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }).start();
+    }
+
+    // Envia uma mensagem de descoberta via UDP e aguarda respostas de outros peers
+    public List<PeerInfo> discoverPeers() {
+        List<PeerInfo> discoveredPeers = new ArrayList<>();
+        try (DatagramSocket socket = new DatagramSocket()) {
+            socket.setBroadcast(true);
+            // Envia a requisição de descoberta para a rede
+            byte[] requestData = DISCOVERY_REQUEST.getBytes();
+            DatagramPacket requestPacket = new DatagramPacket(
+                    requestData, requestData.length, InetAddress.getByName("255.255.255.255"), DISCOVERY_PORT);
+            socket.send(requestPacket);
+
+            // Define timeout para coleta de respostas (3 segundos)
+            socket.setSoTimeout(3000);
+            long startTime = System.currentTimeMillis();
+            while (System.currentTimeMillis() - startTime < 3000) {
+                try {
+                    byte[] buf = new byte[256];
+                    DatagramPacket responsePacket = new DatagramPacket(buf, buf.length);
+                    socket.receive(responsePacket);
+                    String response = new String(responsePacket.getData(), 0, responsePacket.getLength());
+                    if (response.startsWith(DISCOVERY_RESPONSE)) {
+                        // Formato da resposta: "PEER_DISCOVERY_RESPONSE:username:ip:port"
+                        String[] parts = response.split(":");
+                        if (parts.length == 4) {
+                            String peerUsername = parts[1];
+                            String peerIp = parts[2];
+                            int peerPort = Integer.parseInt(parts[3]);
+                            // Exclui a si mesmo da lista
+                            if (!(peerIp.equals(getLocalIPAddress()) && peerPort == port)) {
+                                PeerInfo peerInfo = new PeerInfo(peerUsername, peerIp, peerPort);
+                                boolean exists = false;
+                                for (PeerInfo pi : discoveredPeers) {
+                                    if (pi.ip.equals(peerInfo.ip) && pi.port == peerInfo.port) {
+                                        exists = true;
+                                        break;
+                                    }
+                                }
+                                if (!exists) {
+                                    discoveredPeers.add(peerInfo);
+                                }
+                            }
+                        }
+                    }
+                } catch (SocketTimeoutException e) {
+                    break; // tempo esgotado para receber respostas
+                }
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+        return discoveredPeers;
+    }
+
+    // Método atualizado para obter um endereço IPv4 local não-loopback
+    public String getLocalIPAddress() {
+        try {
+            Enumeration<NetworkInterface> nets = NetworkInterface.getNetworkInterfaces();
+            for (NetworkInterface netint : Collections.list(nets)) {
+                // Ignora interfaces que não estejam ativas ou sejam virtuais
+                if (!netint.isUp() || netint.isLoopback() || netint.isVirtual()) continue;
+                Enumeration<InetAddress> inetAddresses = netint.getInetAddresses();
+                for (InetAddress addr : Collections.list(inetAddresses)) {
+                    if (addr instanceof Inet4Address && !addr.isLoopbackAddress()) {
+                        return addr.getHostAddress();
+                    }
+                }
+            }
+        } catch (SocketException e) {
+            e.printStackTrace();
+        }
+        // Caso não encontre, retorna o localhost
+        return "127.0.0.1";
     }
 
     private void listenForConnections() {
@@ -41,13 +165,13 @@ public class Peer {
                 new Thread(() -> handleConnection(socket)).start();
             } catch (IOException e) {
                 e.printStackTrace();
-                System.out.println("6");
+                System.out.println("Erro ao aceitar conexão.");
             }
         }
     }
 
     private void handleConnection(Socket socket) {
-        if(!socket.isClosed()) {
+        if (!socket.isClosed()) {
             try (BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()))) {
                 String message;
                 while ((message = in.readLine()) != null) {
@@ -57,9 +181,7 @@ public class Peer {
                     }
                 }
             } catch (IOException e) {
-                //Thread.currentThread().interrupt();
-                //e.printStackTrace();
-                //System.out.println("4");
+                // Trata exceção silenciosamente para evitar interrupção de thread
             }
         }
     }
@@ -80,7 +202,7 @@ public class Peer {
             }
         } catch (IOException e) {
             e.printStackTrace();
-            System.out.println("1");
+            System.out.println("Erro ao ler entrada do usuário.");
         }
     }
 
@@ -100,7 +222,7 @@ public class Peer {
                     }
                 } catch (IOException e) {
                     e.printStackTrace();
-                    System.out.println("2");
+                    System.out.println("Erro ao enviar mensagem.");
                 }
             }
         }
@@ -118,14 +240,13 @@ public class Peer {
                 System.out.println("Nova entrada criada para: " + host);
             } else {
                 List<String> historico = history.get(host);
-                for( int i = 0; i < historico.size(); i++ ) {
-                    System.out.println(historico.get(i));
+                for (String msg : historico) {
+                    System.out.println(msg);
                 }
             }
         } catch (IOException e) {
             System.out.println("Erro ao conectar ao peer em " + host + ":" + port);
             e.printStackTrace();
-            System.out.println("3");
         }
     }
 
@@ -133,18 +254,17 @@ public class Peer {
         System.out.println(history);
         Scanner scanner = new Scanner(System.in);
 
-        // Solicita o nome do usuário
+        // Solicita apenas o nome do usuário (IP e porta serão obtidos automaticamente)
         System.out.print("Digite seu nome de usuário: ");
         String username = scanner.nextLine();
 
-        // Solicita a porta
-        System.out.print("Digite a porta para escutar: ");
-        int port = scanner.nextInt();
-        scanner.nextLine(); // Consumir a nova linha pendente
+        // Cria o peer com porta 0 para alocação automática
+        hostPeer = new Peer(username, 0);
 
-        // Inicia o peer
-        hostPeer = new Peer(username, port);
+        // Inicia o responder de descoberta para que este peer possa ser encontrado por outros na mesma rede
+        hostPeer.startDiscoveryResponder();
 
+        // Inicia a conexão
         NewConnection();
     }
 
@@ -158,16 +278,27 @@ public class Peer {
         String resposta = scanner.nextLine();
 
         if (resposta.equalsIgnoreCase("s")) {
-            System.out.print("Digite o endereço do peer (host): ");
-            String peerHost = scanner.nextLine();
-
-            System.out.print("Digite a porta do peer: ");
-            int peerPort = scanner.nextInt();
-            scanner.nextLine(); // Consumir a nova linha pendente
-
-            is_chatting = true;
-            // Conecta ao peer
-            hostPeer.connectToPeer(peerHost, peerPort);
+            // Descobre os peers disponíveis via UDP
+            List<PeerInfo> availablePeers = hostPeer.discoverPeers();
+            if (availablePeers.isEmpty()) {
+                System.out.println("Nenhum peer disponível no momento. Tente novamente mais tarde.");
+            } else {
+                System.out.println("Peers disponíveis:");
+                for (int i = 0; i < availablePeers.size(); i++) {
+                    System.out.println(i + ": " + availablePeers.get(i).toString());
+                }
+                System.out.print("Digite o número do peer para se conectar: ");
+                int choice = scanner.nextInt();
+                scanner.nextLine(); // Consumir a nova linha pendente
+                if (choice >= 0 && choice < availablePeers.size()) {
+                    PeerInfo selectedPeer = availablePeers.get(choice);
+                    is_chatting = true;
+                    hostPeer.connectToPeer(selectedPeer.ip, selectedPeer.port);
+                } else {
+                    System.out.println("Opção inválida.");
+                }
+            }
         }
+        // Se o usuário responder "n", o peer ficará aguardando conexões de outros peers.
     }
 }
